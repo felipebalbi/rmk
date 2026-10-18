@@ -1,4 +1,4 @@
-//! rmk's only test target, named `integration` after this directory.
+//! RMK's only test target, named `integration` after this directory.
 //!
 //! [`simulator`] is the harness every case runs on. `run_tests!` expands each
 //! `scenarios/*.toml` into a `mod` of keyboard-behavior tests;
@@ -10,6 +10,8 @@
 // subset of it — so per-row dead code is expected, not a finding.
 #![allow(dead_code)]
 
+#[cfg(feature = "buffered_tap_hold")]
+mod buffered_tap_hold;
 mod simulator;
 
 #[cfg(feature = "_ble")]

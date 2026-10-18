@@ -13,12 +13,72 @@ use {
 use crate::config::{BehaviorConfig, Hand, MouseKeyConfig, OneShotModifiersConfig, PositionalConfig};
 use crate::event::{KeyboardEvent, KeyboardEventPos, LayerChangeEvent, publish_event};
 use crate::input_device::rotary_encoder::Direction;
+#[cfg(feature = "buffered_tap_hold")]
+use crate::keyboard::buffered_tap_hold::{AdmittedKey, ExecutionBinding, KeyIdentity, PositionCapture};
 use crate::keyboard::combo::Combo;
 use crate::keyboard::macros::Macros;
 #[cfg(feature = "host_lock")]
 use crate::matrix::MatrixState;
 
 pub(crate) const HOLD_BUFFER_SIZE: usize = 16;
+
+#[cfg(all(test, feature = "buffered_tap_hold"))]
+mod capture_tests {
+    use embassy_time::Instant;
+    use rmk_types::action::Action;
+    use rmk_types::keycode::{HidKeyCode, KeyCode};
+    use rmk_types::modifier::ModifierCombination;
+
+    use super::*;
+
+    #[test]
+    fn capture_generations_and_release_bindings_are_independent() {
+        embassy_futures::block_on(async {
+            let base = KeyAction::Single(Action::Key(KeyCode::Hid(HidKeyCode::M)));
+            let quote = KeyAction::Single(Action::KeyWithModifier(HidKeyCode::Quote, ModifierCombination::LSHIFT));
+            let mut data = KeymapData::new([[[base]], [[quote]]]);
+            let mut behavior = BehaviorConfig::default();
+            let positions = PositionalConfig::default();
+            let keymap = KeyMap::new(&mut data, &mut behavior, &positions).await;
+            let down = KeyboardEvent::key(0, 0, true);
+            let up = KeyboardEvent::key(0, 0, false);
+            let admit =
+                |event, ms, seq| keymap.capture_admit(event, Instant::from_millis(ms), seq, Instant::from_millis(0));
+            let first = admit(down, 10, 1).unwrap();
+            assert_eq!(first.combo_binding, base);
+            assert!(
+                admit(down, 11, 2).is_none(),
+                "duplicate down must not replace ownership"
+            );
+            assert!(admit(KeyboardEvent::key(0, 1, true), 12, 3).is_none());
+            assert!(admit(KeyboardEvent::key(1, 0, true), 12, 4).is_none());
+            keymap.activate_layer(1);
+            assert!(keymap.capture_commit_press(first, quote));
+            keymap.capture_action_state(down.pos, Some(quote.to_action()));
+            let released = admit(up, 20, 5).unwrap();
+            assert_eq!(first.identity, released.identity);
+            assert_eq!(released.at, Instant::from_millis(20));
+            assert_eq!(released.combo_binding, base);
+            keymap.capture_finish_admission(released);
+            keymap.set_action_at(down.pos, 1, KeyAction::No);
+            let binding = keymap.capture_execution(first.identity).unwrap();
+            assert_eq!(binding.binding, quote);
+            assert_eq!(binding.action_down, Some(quote.to_action()));
+            let second = admit(down, 30, 6).unwrap();
+            assert_ne!(first.identity, second.identity);
+            assert!(
+                !keymap.capture_commit_press(second, base),
+                "cannot overwrite an unreleased generation"
+            );
+            keymap.capture_finish_execution(first.identity);
+            assert!(keymap.capture_commit_press(second, base));
+            keymap.capture_finish_execution(first.identity);
+            assert_eq!(keymap.capture_execution(second.identity).unwrap().binding, base);
+            assert!(keymap.capture_execution(first.identity).is_none());
+            keymap.capture_finish_execution(second.identity);
+        });
+    }
+}
 
 /// All allocated data needed to build a [`KeyMap`].
 pub struct KeymapData<
@@ -42,6 +102,12 @@ pub struct KeymapData<
     encoder_layer_cache: [[u8; 2]; NUM_ENCODER],
     /// Layer cache for touchpad gestures
     touch_layer_cache: [[u8; TouchGesture::COUNT]; NUM_TOUCHPAD],
+    #[cfg(feature = "buffered_tap_hold")]
+    key_capture: [[PositionCapture; COL]; ROW],
+    #[cfg(feature = "buffered_tap_hold")]
+    encoder_capture: [[PositionCapture; 2]; NUM_ENCODER],
+    #[cfg(feature = "buffered_tap_hold")]
+    touch_capture: [[PositionCapture; TouchGesture::COUNT]; NUM_TOUCHPAD],
     /// VIA/Vial layout options; persisted via `LayoutOption`
     pub(crate) layout_option: u32,
     /// The macro buffer, see [`crate::keyboard::macros`].
@@ -63,6 +129,12 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize> KeymapData<ROW,
             layer_cache: [[0; COL]; ROW],
             encoder_layer_cache: [],
             touch_layer_cache: [],
+            #[cfg(feature = "buffered_tap_hold")]
+            key_capture: [[PositionCapture::EMPTY; COL]; ROW],
+            #[cfg(feature = "buffered_tap_hold")]
+            encoder_capture: [],
+            #[cfg(feature = "buffered_tap_hold")]
+            touch_capture: [],
             layout_option: 0,
             #[cfg(feature = "host")]
             macros: [0; crate::MACRO_SPACE_SIZE],
@@ -88,6 +160,12 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
             layer_cache: [[0; COL]; ROW],
             encoder_layer_cache: [[0u8; 2]; NUM_ENCODER],
             touch_layer_cache: [],
+            #[cfg(feature = "buffered_tap_hold")]
+            key_capture: [[PositionCapture::EMPTY; COL]; ROW],
+            #[cfg(feature = "buffered_tap_hold")]
+            encoder_capture: [[PositionCapture::EMPTY; 2]; NUM_ENCODER],
+            #[cfg(feature = "buffered_tap_hold")]
+            touch_capture: [],
             layout_option: 0,
             #[cfg(feature = "host")]
             macros: [0; crate::MACRO_SPACE_SIZE],
@@ -113,6 +191,12 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
             layer_cache: self.layer_cache,
             encoder_layer_cache: self.encoder_layer_cache,
             touch_layer_cache: [[0u8; TouchGesture::COUNT]; NUM_TOUCHPAD],
+            #[cfg(feature = "buffered_tap_hold")]
+            key_capture: self.key_capture,
+            #[cfg(feature = "buffered_tap_hold")]
+            encoder_capture: self.encoder_capture,
+            #[cfg(feature = "buffered_tap_hold")]
+            touch_capture: [[PositionCapture::EMPTY; TouchGesture::COUNT]; NUM_TOUCHPAD],
             layout_option: self.layout_option,
             #[cfg(feature = "host")]
             macros: self.macros,
@@ -157,6 +241,12 @@ struct KeyMapInner<'a> {
     encoder_layer_cache: &'a mut [u8],
     /// Layer cache for touchpad gestures: num_touchpad * TouchGesture::COUNT
     touch_layer_cache: &'a mut [u8],
+    #[cfg(feature = "buffered_tap_hold")]
+    key_capture: &'a mut [PositionCapture],
+    #[cfg(feature = "buffered_tap_hold")]
+    encoder_capture: &'a mut [PositionCapture],
+    #[cfg(feature = "buffered_tap_hold")]
+    touch_capture: &'a mut [PositionCapture],
     /// Behavior configuration
     behavior: &'a mut BehaviorConfig,
     /// Hand info: row * col (read-only)
@@ -172,6 +262,35 @@ struct KeyMapInner<'a> {
 }
 
 impl KeyMapInner<'_> {
+    #[cfg(feature = "buffered_tap_hold")]
+    fn capture_slot(&mut self, pos: KeyboardEventPos) -> Option<&mut PositionCapture> {
+        match pos {
+            KeyboardEventPos::Key(p) if (p.row as usize) < self.row && (p.col as usize) < self.col => {
+                self.key_capture.get_mut(p.row as usize * self.col + p.col as usize)
+            }
+            KeyboardEventPos::RotaryEncoder(p) if p.direction != Direction::None => {
+                self.encoder_capture.get_mut(p.id as usize * 2 + p.direction as usize)
+            }
+            KeyboardEventPos::Touch(p) => self
+                .touch_capture
+                .get_mut(p.id as usize * TouchGesture::COUNT + p.gesture as usize),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    fn capture_active_binding(&self, pos: KeyboardEventPos) -> KeyAction {
+        for layer in (0..self.num_layer).rev() {
+            if self.layer_state[layer] || layer as u8 == self.behavior.default_layer {
+                let action = self.get_action_at(pos, layer);
+                if action != KeyAction::Transparent {
+                    return action;
+                }
+            }
+        }
+        KeyAction::No
+    }
+
     #[inline]
     fn layer_index(&self, layer: usize, row: usize, col: usize) -> usize {
         layer * self.row * self.col + row * self.col + col
@@ -435,6 +554,170 @@ impl KeyMapInner<'_> {
 // Keep `inner` borrows inside sync methods so no borrow crosses an await.
 
 impl<'a> KeyMap<'a> {
+    #[cfg(all(feature = "buffered_tap_hold", any(test, feature = "std")))]
+    pub(crate) fn assert_capture_idle(&self) {
+        let inner = self.inner.borrow();
+        for slot in inner
+            .key_capture
+            .iter()
+            .chain(inner.encoder_capture.iter())
+            .chain(inner.touch_capture.iter())
+        {
+            assert!(
+                slot.admitted.is_none() && slot.executed.is_none(),
+                "capture position leaked: {slot:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_requested(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.behavior.morse.default_profile.buffered_tap_hold() == Some(true)
+            || inner
+                .behavior
+                .morse
+                .profiles
+                .iter()
+                .any(|profile| profile.buffered_tap_hold() == Some(true))
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_admitted(&self, pos: KeyboardEventPos) -> Option<AdmittedKey> {
+        self.inner.borrow_mut().capture_slot(pos)?.admitted
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_committed(&self, pos: KeyboardEventPos) -> Option<ExecutionBinding> {
+        self.inner.borrow_mut().capture_slot(pos)?.executed
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_binding(&self, pos: KeyboardEventPos) -> KeyAction {
+        self.inner.borrow().capture_active_binding(pos)
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_set_owner(&self, identity: KeyIdentity) {
+        if let Some(slot) = self.inner.borrow_mut().capture_slot(identity.pos)
+            && let Some(executed) = &mut slot.executed
+            && executed.identity == identity
+        {
+            executed.buffered_owner = true;
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_completed_tap(&self, pos: KeyboardEventPos) -> Option<(KeyAction, embassy_time::Instant)> {
+        self.inner.borrow_mut().capture_slot(pos)?.completed_tap
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_remember_tap(&self, input: AdmittedKey, binding: KeyAction) {
+        if let Some(slot) = self.inner.borrow_mut().capture_slot(input.identity.pos) {
+            slot.completed_tap = Some((binding, input.at));
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_admit(
+        &self,
+        event: KeyboardEvent,
+        at: embassy_time::Instant,
+        sequence: u64,
+        last_simple_before: embassy_time::Instant,
+    ) -> Option<AdmittedKey> {
+        let mut inner = self.inner.borrow_mut();
+        if !event.pressed {
+            let down = inner.capture_slot(event.pos)?.admitted?;
+            return Some(AdmittedKey {
+                event,
+                at,
+                sequence,
+                last_simple_before,
+                ..down
+            });
+        }
+        let binding = inner.capture_active_binding(event.pos);
+        let slot = inner.capture_slot(event.pos)?;
+        if slot.admitted.is_some() {
+            warn!("Duplicate buffered admission rejected");
+            return None;
+        }
+        let admitted = AdmittedKey {
+            identity: KeyIdentity {
+                pos: event.pos,
+                generation: sequence,
+            },
+            event,
+            at,
+            sequence,
+            combo_binding: binding,
+            last_simple_before,
+        };
+        slot.admitted = Some(admitted);
+        Some(admitted)
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_finish_admission(&self, input: AdmittedKey) {
+        if !input.event.pressed
+            && let Some(slot) = self.inner.borrow_mut().capture_slot(input.identity.pos)
+            && slot.admitted.is_some_and(|down| down.identity == input.identity)
+        {
+            slot.admitted = None;
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_execution(&self, identity: KeyIdentity) -> Option<ExecutionBinding> {
+        self.inner
+            .borrow_mut()
+            .capture_slot(identity.pos)?
+            .executed
+            .filter(|executed| executed.identity == identity)
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_commit_press(&self, input: AdmittedKey, binding: KeyAction) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(slot) = inner.capture_slot(input.identity.pos) else {
+            return false;
+        };
+        if slot.executed.is_some() {
+            return false;
+        }
+        inner.get_action_with_layer_cache(input.event);
+        inner.capture_slot(input.identity.pos).unwrap().executed = Some(ExecutionBinding {
+            identity: input.identity,
+            binding,
+            action_down: None,
+            buffered_owner: false,
+        });
+        true
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_action_state(&self, pos: KeyboardEventPos, down: Option<rmk_types::action::Action>) {
+        if let Some(slot) = self.inner.borrow_mut().capture_slot(pos)
+            && let Some(executed) = &mut slot.executed
+        {
+            executed.action_down = down;
+        }
+    }
+
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) fn capture_finish_execution(&self, identity: KeyIdentity) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(slot) = inner.capture_slot(identity.pos)
+            && slot.executed.is_some_and(|executed| executed.identity == identity)
+        {
+            slot.executed = None;
+            let default_layer = inner.behavior.default_layer;
+            inner.replace_layer_cache(identity.pos, default_layer);
+        }
+    }
+
     /// Flatten [`KeymapData`] and build the `KeyMap`.
     ///
     /// This is the shared construction logic used by both `new` and `new_from_storage`.
@@ -481,6 +764,12 @@ impl<'a> KeyMap<'a> {
                 layer_cache,
                 encoder_layer_cache,
                 touch_layer_cache,
+                #[cfg(feature = "buffered_tap_hold")]
+                key_capture: data.key_capture.as_mut_slice().as_flattened_mut(),
+                #[cfg(feature = "buffered_tap_hold")]
+                encoder_capture: data.encoder_capture.as_mut_slice().as_flattened_mut(),
+                #[cfg(feature = "buffered_tap_hold")]
+                touch_capture: data.touch_capture.as_mut_slice().as_flattened_mut(),
                 behavior,
                 hand,
                 mouse_buttons: 0,

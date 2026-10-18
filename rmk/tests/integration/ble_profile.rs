@@ -10,6 +10,42 @@ use crate::simulator::SimKeyboard;
 
 const USER0: KeyAction = KeyAction::Single(Action::User(0));
 
+#[cfg(feature = "buffered_tap_hold")]
+#[test]
+fn deferred_user_hold_cannot_rearm_after_intervening_input() {
+    test_block_on(async {
+        let mut behavior = rmk::config::BehaviorConfig::default();
+        behavior.morse.default_profile = rmk::types::morse::MorseProfile::new(
+            Some(false),
+            Some(rmk::types::morse::MorseMode::Normal),
+            Some(200),
+            Some(250),
+        )
+        .with_buffered_tap_hold(Some(true));
+        let thumb = KeyAction::TapHold(Action::Key(KeyCode::Hid(HidKeyCode::Tab)), Action::LayerOn(1), u8::MAX);
+        let mut keyboard = SimKeyboard::builder([[[thumb, USER0, k!(A)]], [[KeyAction::Transparent; 3]]])
+            .behavior_config(behavior)
+            .build()
+            .await;
+        keyboard
+            .press(0, 0)
+            .delay(20)
+            .press(0, 1)
+            .delay(20)
+            .press(0, 2)
+            .delay(20)
+            .release(0, 2)
+            .delay(5200)
+            .release(0, 1)
+            .release(0, 0)
+            .expect_keys([HidKeyCode::A])
+            .expect_keys([])
+            .run()
+            .await;
+        assert_eq!(keyboard.ble_profile_actions(), ["Switch(0)"]);
+    });
+}
+
 #[test]
 fn held_profile_key_clears_its_bond_after_5s() {
     test_block_on(async {

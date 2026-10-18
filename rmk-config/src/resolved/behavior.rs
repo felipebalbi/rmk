@@ -92,6 +92,7 @@ pub struct Morse {
 
 #[derive(Clone)]
 pub struct MorseProfile {
+    pub buffered_tap_hold: Option<bool>,
     pub enable_flow_tap: Option<bool>,
     pub unilateral_tap: Option<bool>,
     pub permissive_hold: Option<bool>,
@@ -189,6 +190,7 @@ impl crate::KeyboardTomlConfig {
             // Seeded rather than left `None` so the switch is stored and read
             // back over Rynk like the profile's other fields.
             let default_profile = MorseProfile {
+                buffered_tap_hold: m.buffered_tap_hold,
                 enable_flow_tap: Some(m.enable_flow_tap.unwrap_or(false)),
                 unilateral_tap: m.unilateral_tap,
                 permissive_hold: m.permissive_hold,
@@ -287,6 +289,7 @@ fn resolve_macro_operation(op: crate::MacroOperation) -> MacroOperation {
 
 fn resolve_morse_profile(p: &crate::MorseProfile) -> MorseProfile {
     MorseProfile {
+        buffered_tap_hold: p.buffered_tap_hold,
         enable_flow_tap: p.enable_flow_tap,
         unilateral_tap: p.unilateral_tap,
         permissive_hold: p.permissive_hold,

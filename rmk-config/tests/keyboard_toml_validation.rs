@@ -38,6 +38,32 @@ fn write_temp_keyboard_toml(name: &str, content: &str) -> std::path::PathBuf {
     path
 }
 
+#[test]
+fn buffered_profiles_are_accepted() {
+    let path = write_temp_keyboard_toml(
+        "buffered-profiles",
+        &format!(
+            "{MINIMAL_KEYBOARD_TOML}\n{}",
+            r#"
+[behavior.morse]
+buffered_tap_hold = true
+[behavior.morse.profiles]
+THUMB = { normal_mode = true }
+LEGACY = { buffered_tap_hold = false }
+"#
+        ),
+    );
+    let result = std::panic::catch_unwind(|| KeyboardTomlConfig::new_from_toml_path(&path).behavior().unwrap());
+    std::fs::remove_file(path).unwrap();
+    let morse = result
+        .expect("buffered profile authoring must be accepted")
+        .morse
+        .unwrap();
+    assert_eq!(morse.default_profile.buffered_tap_hold, Some(true));
+    assert_eq!(morse.profiles["THUMB"].buffered_tap_hold, None);
+    assert_eq!(morse.profiles["LEGACY"].buffered_tap_hold, Some(false));
+}
+
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     payload
         .downcast_ref::<String>()

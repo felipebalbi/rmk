@@ -118,6 +118,8 @@ pub struct HeldKey {
     pub press_time: Instant,
     /// The timeout time for the key
     pub timeout_time: Instant,
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) legacy_epoch: u64,
 }
 
 impl HeldKey {
@@ -134,6 +136,8 @@ impl HeldKey {
             state,
             press_time,
             timeout_time,
+            #[cfg(feature = "buffered_tap_hold")]
+            legacy_epoch: 0,
         }
     }
 }

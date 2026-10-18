@@ -450,6 +450,92 @@ fn behavior_write_survives_restart() {
     });
 }
 
+#[cfg(feature = "buffered_tap_hold")]
+#[test]
+fn captured_legacy_release_keeps_binding_after_a_host_edit() {
+    use rmk::types::morse::{MorseMode, MorseProfile};
+    test_block_on(async {
+        let mut behavior = BehaviorConfig::default();
+        behavior.morse.default_profile = MorseProfile::new(Some(false), Some(MorseMode::Normal), Some(200), Some(250))
+            .with_buffered_tap_hold(Some(true));
+        behavior
+            .morse
+            .profiles
+            .push(MorseProfile::const_default().with_buffered_tap_hold(Some(false)))
+            .unwrap();
+        let legacy = KeyAction::TapHold(Action::Key(KeyCode::Hid(HidKeyCode::A)), Action::LayerOn(1), 0);
+        let thumb = KeyAction::TapHold(Action::Key(KeyCode::Hid(HidKeyCode::Tab)), Action::LayerOn(1), u8::MAX);
+        let mut keyboard = SimKeyboard::builder([[[legacy, thumb]], [[KeyAction::Transparent; 2]]])
+            .behavior_config(behavior)
+            .build()
+            .await;
+        keyboard.delay(1000).press(0, 0).delay(20).press(0, 1);
+        let mut request = via(ViaCommand::DynamicKeymapSetKeyCode);
+        request[1..4].copy_from_slice(&[0, 0, 0]);
+        request[4..6].copy_from_slice(&to_via_keycode(KeyAction::No).to_be_bytes());
+        keyboard.echo(request);
+        keyboard
+            .delay(20)
+            .release(0, 0)
+            .delay(220)
+            .release(0, 1)
+            .expect_keys([HidKeyCode::A])
+            .expect_keys([])
+            .run()
+            .await;
+    });
+}
+
+#[cfg(all(feature = "storage", feature = "buffered_tap_hold"))]
+#[test]
+fn matching_schema_stored_false_wins_over_compiled_true() {
+    use rmk::config::BehaviorConfig;
+    use rmk::types::morse::{MorseMode, MorseProfile};
+    test_block_on(async {
+        let key = |code| Action::Key(KeyCode::Hid(code));
+        let thumb = KeyAction::TapHold(key(HidKeyCode::Tab), Action::LayerOn(1), u8::MAX);
+        let map = [
+            [[thumb, KeyAction::Single(key(HidKeyCode::A))]],
+            [[KeyAction::Transparent, KeyAction::Single(key(HidKeyCode::B))]],
+        ];
+        let flash = crate::simulator::Flash::new();
+        let profile = MorseProfile::new(Some(false), Some(MorseMode::Normal), Some(200), Some(250));
+        let mut behavior = BehaviorConfig::default();
+        behavior.morse.default_profile = profile.with_buffered_tap_hold(Some(false));
+        {
+            let mut keyboard = SimKeyboard::builder(map)
+                .behavior_config(behavior)
+                .build_with_flash(flash.clone())
+                .await;
+            // A host write saves the complete runtime behavior. Defaults alone
+            // deliberately do not populate persistent settings on a blank flash.
+            keyboard.set_behavior(SettingKey::ComboTimeout, 50);
+            keyboard.run().await;
+        }
+        let mut behavior = BehaviorConfig::default();
+        behavior.morse.default_profile = profile.with_buffered_tap_hold(Some(true));
+        let mut keyboard = SimKeyboard::builder(map)
+            .behavior_config(behavior)
+            .build_with_flash(flash)
+            .await;
+        keyboard
+            .delay(1000)
+            .press(0, 0)
+            .delay(20)
+            .press(0, 1)
+            .delay(20)
+            .release(0, 1)
+            .delay(20)
+            .release(0, 0)
+            .expect_keys([HidKeyCode::A])
+            .expect_keys([])
+            .expect_keys([HidKeyCode::Tab])
+            .expect_keys([])
+            .run()
+            .await;
+    });
+}
+
 /// QMK's `TT(1)`, as Vial sends it.
 const TT1: u16 = 0x52C1;
 

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
-use rmk_config::resolved::KEYCODE_ALIAS;
 use rmk_config::resolved::behavior::MorseProfile;
+use rmk_config::resolved::KEYCODE_ALIAS;
 use strum::VariantNames;
 
 #[derive(Default)]
@@ -176,6 +176,12 @@ pub(crate) fn expand_profile(profile: &MorseProfile) -> proc_macro2::TokenStream
         quote! { ::core::option::Option::None }
     };
 
+    let buffered_tap_hold = if let Some(enable) = profile.buffered_tap_hold {
+        quote! { ::core::option::Option::Some(#enable) }
+    } else {
+        quote! { ::core::option::Option::None }
+    };
+
     let hold_timeout_ms = expand_timeout("hold_timeout", &profile.hold_timeout_ms, 13);
     let gap_timeout_ms = expand_timeout("gap_timeout", &profile.gap_timeout_ms, 13);
     let quick_tap_timeout_ms =
@@ -184,6 +190,7 @@ pub(crate) fn expand_profile(profile: &MorseProfile) -> proc_macro2::TokenStream
     quote! {
         rmk::types::morse::MorseProfile::new(#unilateral_tap, #mode, #hold_timeout_ms, #gap_timeout_ms)
             .with_enable_flow_tap(#enable_flow_tap)
+            .with_buffered_tap_hold(#buffered_tap_hold)
             .with_quick_tap_timeout_ms(#quick_tap_timeout_ms)
     }
 }
@@ -591,6 +598,7 @@ mod tests {
 
     fn profile(enable_flow_tap: Option<bool>) -> MorseProfile {
         MorseProfile {
+            buffered_tap_hold: None,
             enable_flow_tap,
             unilateral_tap: Some(true),
             permissive_hold: None,
@@ -686,10 +694,8 @@ mod tests {
             squash(&expand("A")).contains("KeyAction::Single(::rmk::types::action::Action::Key")
         );
         // Call-form single actions route through the shared parser, still wrapped in Single.
-        assert!(
-            squash(&expand("MO(1)"))
-                .contains("KeyAction::Single(::rmk::types::action::Action::LayerOn(1u8))")
-        );
+        assert!(squash(&expand("MO(1)"))
+            .contains("KeyAction::Single(::rmk::types::action::Action::LayerOn(1u8))"));
         assert!(squash(&expand("WM(C,LCtrl)")).contains("Action::KeyWithModifier"));
         assert!(squash(&expand("MOD(LCtrl | LAlt | LGui)")).contains("Action::Modifier"));
         assert!(squash(&expand("OSM(LShift)")).contains("Action::OneShotModifier"));
@@ -724,10 +730,8 @@ mod tests {
         assert!(
             squash(&expand("MT(A, LShift)")).contains("TapHold(::rmk::types::action::Action::Key")
         );
-        assert!(
-            squash(&expand("TH(Space, Backspace)"))
-                .contains("TapHold(::rmk::types::action::Action::Key")
-        );
+        assert!(squash(&expand("TH(Space, Backspace)"))
+            .contains("TapHold(::rmk::types::action::Action::Key"));
         assert!(squash(&expand("LT(2, Enter)")).contains("Action::LayerOn(2u8)"));
     }
 

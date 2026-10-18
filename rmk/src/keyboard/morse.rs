@@ -64,6 +64,7 @@ impl<'a> Keyboard<'a> {
         debug!("Processing morse keys: {:?}", event);
         assert!(key_action.is_morse());
 
+        let logical_time = self.key_event_time();
         // Process the morse key
         if event.pressed {
             // Pressed, check the held buffer, update the tap state
@@ -122,7 +123,7 @@ impl<'a> Keyboard<'a> {
                 debug!("Releasing morse key: {:?}", k);
                 match k.state {
                     KeyState::Pressed(pattern) => {
-                        let released_time = Instant::now(); // TODO? It would be better if the event would carry the real timestamp of the release event!
+                        let released_time = logical_time;
 
                         let hold = released_time >= k.timeout_time;
 
@@ -221,7 +222,7 @@ impl<'a> Keyboard<'a> {
                     KeyState::Holding(pattern) => {
                         // The try_predict_final_action => None is already decided, when we entered in Holding mode
                         // So, just expect a possible longer morse pattern (or idle timeout), update the state
-                        let released_time = Instant::now(); // TODO? It would be better if the event would carry the real timestamp of the release event!
+                        let released_time = logical_time;
                         k.state = KeyState::Released(pattern);
                         // Use current release time for `IdleAfterTap` state
                         k.press_time = released_time; // Use release time as the "press_time"
@@ -244,7 +245,7 @@ impl<'a> Keyboard<'a> {
                         // hold-after-tap (the tap-then-hold repeat). Without this a flow-tapped
                         // tap leaves no trace and the next press-and-hold resolves as a fresh hold.
                         if Self::action_from_pattern(self.keymap, key_action, TAP.followed_by_hold()) != Action::No {
-                            let now = Instant::now();
+                            let now = logical_time;
                             let timeout = Self::morse_timeout(self.keymap, key_action, false);
                             if let Some(k) = self.held_buffer.find_pos_mut(event.pos) {
                                 k.state = KeyState::EarlyFired(TAP);
@@ -265,10 +266,17 @@ impl<'a> Keyboard<'a> {
         self.held_buffer.keys.sort_unstable_by_key(|k| k.press_time);
 
         // Trigger all non morse keys in the buffer
-        while let Some(key) = self.held_buffer.remove_if(|k| !k.action.is_morse()) {
+        #[cfg(feature = "buffered_tap_hold")]
+        let capture_active = self.buffered.engaged;
+        #[cfg(not(feature = "buffered_tap_hold"))]
+        let capture_active = false;
+        while let Some(key) = self
+            .held_buffer
+            .remove_if(|k| !k.action.is_morse() && (!capture_active || k.state != KeyState::WaitingCombo))
+        {
             debug!("Trigger non-morse key: {:?}", key);
             let action = if key.event.pos.is_physical() {
-                self.keymap.get_action_with_layer_cache(key.event)
+                self.action_for_execution(key.event)
             } else {
                 key.action
             };

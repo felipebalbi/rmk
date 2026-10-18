@@ -57,6 +57,9 @@ compile_error!("feature `dfu_lock` requires the `_dfu` feature — enable `dfu_r
 // Re-export self as ::rmk for macro-generated code to work both inside and outside the crate
 extern crate self as rmk;
 
+/// Whether this build supports opt-in buffered physical tap-hold decisions.
+pub const BUFFERED_TAP_HOLD_ENABLED: bool = cfg!(feature = "buffered_tap_hold");
+
 // TODO: re-export to `constants`?
 pub(crate) use rmk_types::constants::*;
 

@@ -12,6 +12,25 @@ use embassy_time::{Duration, MockDriver};
 
 pub const COMBO_MAX_LENGTH: usize = crate::COMBO_MAX_LENGTH;
 
+#[cfg(feature = "buffered_tap_hold")]
+pub fn assert_buffered_idle(keyboard: &crate::keyboard::Keyboard<'_>) {
+    assert!(keyboard.buffered.owner.is_none(), "buffered owner leaked");
+    assert!(
+        keyboard.buffered.fifo.is_empty(),
+        "capture FIFO leaked: {:?}",
+        keyboard.buffered.fifo
+    );
+    assert!(keyboard.buffered.batch.is_empty(), "producer batch leaked");
+    assert!(keyboard.buffered.logical.is_none(), "logical replay context leaked");
+    for slot in &keyboard.buffered.combos {
+        assert!(
+            slot.admitted.is_none() && slot.executed.is_none(),
+            "combo capture leaked: {slot:?}"
+        );
+    }
+    keyboard.keymap.assert_capture_idle();
+}
+
 #[cfg(feature = "vial")]
 pub fn to_via_keycode(action: rmk_types::action::KeyAction) -> u16 {
     crate::host::via::keycode_convert::to_via_keycode(action)

@@ -34,6 +34,8 @@ use crate::keymap::KeyMap;
 use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, boot};
 
 pub(crate) mod auto_mouse_layer;
+#[cfg(feature = "buffered_tap_hold")]
+pub(crate) mod buffered_tap_hold;
 pub mod combo;
 pub(crate) mod fork;
 pub(crate) mod held_buffer;
@@ -174,6 +176,8 @@ pub struct Keyboard<'a> {
 
     /// Buffered held keys
     pub held_buffer: HeldBuffer,
+    #[cfg(feature = "buffered_tap_hold")]
+    pub(crate) buffered: buffered_tap_hold::BufferedState,
 
     /// Record the timestamp of last **simple key** press.
     /// It's used in tap-hold prior-idle-time check.
@@ -251,6 +255,8 @@ impl<'a> Keyboard<'a> {
             fork_states: [None; FORK_MAX_NUM],
             fork_keep_mask: ModifierCombination::default(),
             held_buffer: HeldBuffer::new(),
+            #[cfg(feature = "buffered_tap_hold")]
+            buffered: buffered_tap_hold::BufferedState::new(),
             registered: Vec::new(),
             mouse: MouseState::new(),
             media_report: MediaKeyboardReport { usage_id: 0 },
@@ -279,6 +285,17 @@ impl<'a> Keyboard<'a> {
     /// its partners, or a morse key waiting out its timeout.
     pub fn next_buffered_key(&self) -> Option<HeldKey> {
         self.held_buffer.next_timeout(|k| {
+            #[cfg(feature = "buffered_tap_hold")]
+            if self.buffered.engaged
+                && k.state != KeyState::WaitingCombo
+                && self
+                    .buffered
+                    .fifo
+                    .first()
+                    .is_some_and(|record| record.input.at < k.timeout_time)
+            {
+                return false;
+            }
             matches!(k.state, KeyState::WaitingCombo)
                 || (k.action.is_morse()
                     && matches!(
@@ -292,9 +309,11 @@ impl<'a> Keyboard<'a> {
     /// cleared or moved forward by `fire_expired`, otherwise `run()` busy-loops on it.
     fn next_deadline(&self) -> Option<Instant> {
         let buffered = self.next_buffered_key().map(|k| k.timeout_time);
+        #[cfg(feature = "buffered_tap_hold")]
+        let buffered = [buffered, self.buffered_next_deadline()].into_iter().flatten().min();
         // A buffered key may still use the one-shot it was pressed under, so the
         // one-shot can only expire when the buffer is empty.
-        let one_shot = if buffered.is_some() {
+        let one_shot = if self.oneshot_is_protected() {
             None
         } else {
             [self.osm_deadline, self.osl_deadline].into_iter().flatten().min()
@@ -312,9 +331,22 @@ impl<'a> Keyboard<'a> {
         .min()
     }
 
+    fn oneshot_is_protected(&self) -> bool {
+        #[cfg(feature = "buffered_tap_hold")]
+        if self.buffered.owner.is_some() || !self.buffered.fifo.is_empty() || !self.buffered.batch.is_empty() {
+            return true;
+        }
+        self.next_buffered_key().is_some()
+    }
+
     /// Handle every deadline that is due. Each step checks its own deadline, so
     /// calling this too early does nothing.
     async fn fire_expired(&mut self) {
+        #[cfg(feature = "buffered_tap_hold")]
+        {
+            self.buffered.logical = None;
+            self.buffered.legacy_observed = None;
+        }
         match self.next_buffered_key() {
             // `next_deadline` hides the one-shot while a key is buffered, so at most
             // one of these two can be due.
@@ -325,6 +357,10 @@ impl<'a> Keyboard<'a> {
         self.fire_user_hold().await;
         self.fire_mouse_repeat().await;
         self.fire_macro().await;
+        #[cfg(feature = "buffered_tap_hold")]
+        if self.buffered.engaged {
+            self.drain_buffered_actions(Instant::now()).await;
+        }
     }
 
     /// Resolve `key` if its timeout has passed: dispatch the combo it waits on, or
@@ -366,6 +402,11 @@ impl<'a> Keyboard<'a> {
 
     /// Process key changes at (row, col)
     pub async fn process_inner(&mut self, event: KeyboardEvent) {
+        #[cfg(feature = "buffered_tap_hold")]
+        {
+            self.buffered.logical = None;
+            self.buffered.legacy_observed = None;
+        }
         // A User-key hold gesture needs 5s without any key event, so cancel it here.
         #[cfg(feature = "_ble")]
         {
@@ -386,17 +427,137 @@ impl<'a> Keyboard<'a> {
         // Capture the event time once per event and thread it through.
         let event_time = Instant::now();
 
+        #[cfg(feature = "buffered_tap_hold")]
+        {
+            self.buffered.sequence = self.buffered.sequence.checked_add(1).expect("input sequence exhausted");
+        }
+
+        #[cfg(feature = "buffered_tap_hold")]
+        if self.buffered.engaged || self.keymap.capture_requested() {
+            self.process_buffered_input(event, event_time).await;
+            return;
+        }
+
+        #[cfg(feature = "buffered_tap_hold")]
+        {
+            self.buffered.admission =
+                self.keymap
+                    .capture_admit(event, event_time, self.buffered.sequence, self.last_press_time);
+        }
+
         // Process key
         let key_action = &self.keymap.get_action_with_layer_cache(event);
 
         if !self.combo_on || self.process_combo(key_action, event, event_time).await {
             self.process_key_action(key_action, event, event_time).await
         }
+        #[cfg(feature = "buffered_tap_hold")]
+        if let Some(input) = self.buffered.admission.take() {
+            self.keymap.capture_finish_admission(input);
+        }
     }
 
     async fn process_key_action(&mut self, key_action: &KeyAction, event: KeyboardEvent, event_time: Instant) {
+        #[cfg(feature = "buffered_tap_hold")]
+        if self.buffered.engaged {
+            self.submit_buffered_action(*key_action, event, event_time).await;
+            return;
+        }
+        #[cfg(feature = "buffered_tap_hold")]
+        let observed = self.submission_input(*key_action, event, event_time);
+        #[cfg(feature = "buffered_tap_hold")]
+        if let Some(input) = observed.filter(|input| input.event.pressed) {
+            if let KeyboardEventPos::Combo(idx) = event.pos {
+                self.buffered.combos[idx as usize].executed = Some(buffered_tap_hold::ExecutionBinding {
+                    identity: input.identity,
+                    binding: *key_action,
+                    action_down: None,
+                    buffered_owner: false,
+                });
+            } else {
+                self.keymap.capture_commit_press(input, *key_action);
+            }
+        }
+        self.process_key_action_legacy(key_action, event, event_time).await;
+        #[cfg(feature = "buffered_tap_hold")]
+        if let Some(input) = observed.filter(|input| !input.event.pressed) {
+            if let KeyboardEventPos::Combo(idx) = event.pos {
+                self.buffered.combos[idx as usize].executed = None;
+            } else {
+                self.keymap.capture_finish_execution(input.identity);
+            }
+        }
+    }
+
+    fn key_event_time(&self) -> Instant {
+        #[cfg(feature = "buffered_tap_hold")]
+        if let Some(input) = self.buffered.logical {
+            return input.at;
+        }
+        Instant::now()
+    }
+
+    fn action_for_execution(&self, event: KeyboardEvent) -> KeyAction {
+        #[cfg(feature = "buffered_tap_hold")]
+        if self.buffered.engaged
+            && let Some(committed) = self.keymap.capture_committed(event.pos)
+        {
+            return committed.binding;
+        }
+        self.keymap.get_action_with_layer_cache(event)
+    }
+
+    fn in_flow_tap_streak(&self) -> bool {
+        #[cfg(feature = "buffered_tap_hold")]
+        if let Some(input) = self.buffered.logical {
+            return self
+                .buffered_recent_simple(input)
+                .is_some_and(|at| input.at.saturating_duration_since(at) < self.keymap.morse_prior_idle_time());
+        }
+        self.last_press_time.elapsed() < self.keymap.morse_prior_idle_time()
+    }
+
+    async fn process_key_action_legacy(&mut self, key_action: &KeyAction, event: KeyboardEvent, event_time: Instant) {
+        #[cfg(feature = "buffered_tap_hold")]
+        if event.pressed {
+            self.buffered.legacy_epoch = self
+                .buffered
+                .legacy_epoch
+                .checked_add(1)
+                .expect("legacy epoch exhausted");
+        }
+        self.process_key_action_legacy_inner(key_action, event, event_time)
+            .await;
+        #[cfg(feature = "buffered_tap_hold")]
+        if event.pressed
+            && let Some(key) = self.held_buffer.find_pos_mut(event.pos)
+        {
+            key.legacy_epoch = self.buffered.legacy_epoch;
+        }
+    }
+
+    async fn process_key_action_legacy_inner(
+        &mut self,
+        key_action: &KeyAction,
+        event: KeyboardEvent,
+        event_time: Instant,
+    ) {
         // First, make the decision for current key and held keys
         let (decision_for_current_key, decisions) = self.make_decisions_for_keys(key_action, event);
+        #[cfg(feature = "buffered_tap_hold")]
+        let decisions = {
+            let mut decisions = decisions;
+            if let Some(cutoff) = self.buffered.legacy_observed {
+                decisions.retain(|(pos, _)| {
+                    *pos == event.pos
+                        || self
+                            .held_buffer
+                            .find_pos(*pos)
+                            .is_some_and(|key| key.legacy_epoch > cutoff)
+                });
+            }
+            decisions
+        };
 
         // Clean up early-fired keys that belong to a different position — their tap was already sent,
         // so they should not linger in the buffer when new events arrive.
@@ -415,7 +576,7 @@ impl<'a> Keyboard<'a> {
                 debug!("Clean buffer, then process current key normally");
                 let key_action = if keyboard_state_updated && event.pos.is_physical() {
                     // The key_action needs to be updated due to the morse key might be triggered
-                    &self.keymap.get_action_with_layer_cache(event)
+                    &self.action_for_execution(event)
                 } else {
                     key_action
                 };
@@ -442,7 +603,7 @@ impl<'a> Keyboard<'a> {
                 // Process current key normally
                 let key_action = if keyboard_state_updated && event.pos.is_physical() {
                     // The key_action needs to be updated due to the morse key might be triggered
-                    &self.keymap.get_action_with_layer_cache(event)
+                    &self.action_for_execution(event)
                 } else {
                     key_action
                 };
@@ -450,7 +611,7 @@ impl<'a> Keyboard<'a> {
             }
             KeyBehaviorDecision::FlowTap => {
                 let key_action = if keyboard_state_updated && event.pos.is_physical() {
-                    &self.keymap.get_action_with_layer_cache(event)
+                    &self.action_for_execution(event)
                 } else {
                     key_action
                 };
@@ -466,7 +627,7 @@ impl<'a> Keyboard<'a> {
                 // entry per position; without this the release handler would find the stale entry
                 // first via find_pos_mut, skip the release report, and leave the key stuck down.
                 self.held_buffer.remove_if(|k| k.event.pos == event.pos);
-                let now = Instant::now();
+                let now = self.key_event_time();
                 let time_out = now + Self::morse_timeout(self.keymap, key_action, true);
                 self.held_buffer.push(HeldKey::new(
                     event,
@@ -535,7 +696,7 @@ impl<'a> Keyboard<'a> {
                 HeldKeyDecision::PermissiveHold | HeldKeyDecision::HoldOnOtherKeyPress => {
                     if let Some(mut held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
                         let action = if held_key.event.pos.is_physical() {
-                            self.keymap.get_action_with_layer_cache(held_key.event)
+                            self.action_for_execution(held_key.event)
                         } else {
                             held_key.action
                         };
@@ -582,7 +743,7 @@ impl<'a> Keyboard<'a> {
                         // A prior layer change (e.g. permissive hold activating a layer)
                         // may have changed what action this key maps to.
                         let key_action = if held_key.event.pos.is_physical() {
-                            self.keymap.get_action_with_layer_cache(held_key.event)
+                            self.action_for_execution(held_key.event)
                         } else {
                             held_key.action
                         };
@@ -655,7 +816,7 @@ impl<'a> Keyboard<'a> {
                     if trigger_normal && let Some(held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
                         debug!("Cleaning buffered normal key");
                         let action = if keyboard_state_updated && held_key.event.pos.is_physical() {
-                            self.keymap.get_action_with_layer_cache(held_key.event)
+                            self.action_for_execution(held_key.event)
                         } else {
                             held_key.action
                         };
@@ -692,7 +853,7 @@ impl<'a> Keyboard<'a> {
         if event.pressed
             && key_action.is_morse()
             && Self::is_flow_tap_enabled(self.keymap, key_action)
-            && self.last_press_time.elapsed() < self.keymap.morse_prior_idle_time()
+            && self.in_flow_tap_streak()
         {
             // It's in key streak, trigger the first tap action
             debug!("Flow tap detected, trigger tap action for current morse key");
@@ -831,7 +992,15 @@ impl<'a> Keyboard<'a> {
         event_time: Instant,
     ) {
         // Start forks
-        let (key_action, dropped_modifiers) = self.try_start_forks(original_key_action, event);
+        #[cfg(feature = "buffered_tap_hold")]
+        let prepared = self.buffered.fork_prepared;
+        #[cfg(not(feature = "buffered_tap_hold"))]
+        let prepared = false;
+        let (key_action, dropped_modifiers) = if prepared {
+            (*original_key_action, false)
+        } else {
+            self.try_start_forks(original_key_action, event)
+        };
 
         // Send the modifier release in its own report. macOS may apply the key first if both share a report.
         if dropped_modifiers {
@@ -1214,6 +1383,22 @@ impl<'a> Keyboard<'a> {
     }
 
     async fn process_key_action_normal(&mut self, action: Action, event: KeyboardEvent) {
+        #[cfg(feature = "buffered_tap_hold")]
+        {
+            let down = event.pressed.then_some(action);
+            if let KeyboardEventPos::Combo(idx) = event.pos {
+                if let Some(binding) = self
+                    .buffered
+                    .combos
+                    .get_mut(idx as usize)
+                    .and_then(|slot| slot.executed.as_mut())
+                {
+                    binding.action_down = down;
+                }
+            } else {
+                self.keymap.capture_action_state(event.pos, down);
+            }
+        }
         publish_event_async(ActionEvent {
             action,
             keyboard_event: event,
@@ -1533,7 +1718,15 @@ impl<'a> Keyboard<'a> {
         if event.pressed {
             // Record last press time, only for the simple key
             if key.is_simple_key() {
-                self.last_press_time = Instant::now();
+                let at = self.key_event_time();
+                self.last_press_time = self.last_press_time.max(at);
+                #[cfg(feature = "buffered_tap_hold")]
+                if let Some(input) = self.buffered.logical {
+                    if self.buffered.simple_prefix.is_full() {
+                        self.buffered.simple_prefix.remove(0);
+                    }
+                    let _ = self.buffered.simple_prefix.push((at, input.sequence));
+                }
             }
 
             // Update last key code
@@ -1649,7 +1842,16 @@ impl<'a> Keyboard<'a> {
             if event.pressed {
                 // Start the 5s hold gesture for any user key. `fire_user_hold` decides
                 // which ids actually do something, so the id list lives in one place.
-                self.user_hold = Some((Instant::now() + Duration::from_secs(5), id));
+                #[cfg(feature = "buffered_tap_hold")]
+                let uninterrupted = self
+                    .buffered
+                    .logical
+                    .is_none_or(|input| input.sequence == self.buffered.sequence);
+                #[cfg(not(feature = "buffered_tap_hold"))]
+                let uninterrupted = true;
+                if uninterrupted {
+                    self.user_hold = Some((self.key_event_time() + Duration::from_secs(5), id));
+                }
             } else {
                 // A tap sends press and release back to back, so cancel what the press started.
                 self.user_hold = None;

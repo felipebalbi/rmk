@@ -250,6 +250,62 @@ A profile contains the following fields:
   - Setting `quick_tap_timeout = "0ms"` explicitly disables quick-tap for that profile, even if a non-zero global default is configured. This lets you opt out on a per-profile basis. Omitting the field entirely causes the profile to inherit the global default.
   - A re-press within the window resolves as a tap even if a `double_tap` action is configured, so double-tapping faster than `quick_tap_timeout` produces two taps instead of the `double_tap` action.
 
+#### Opt-in buffered tap-hold
+
+Build RMK with the `buffered_tap_hold` Cargo feature and set
+`buffered_tap_hold = true` in the default or a named Morse profile. Both opt-ins
+are required; TOML code generation rejects an enabled profile without the feature.
+The feature is off by default and feature-off builds allocate no capture queue.
+A named profile inherits an omitted flag from the default profile; explicit
+`false` overrides it. An effectively unset flag means `false`.
+
+Buffering applies to physical `MT`, `LT`, and `TH` keys, not full Morse or
+tap-dance owners. Following key presses **and releases** wait behind an undecided
+owner. After its decision, RMK commits the owner's action and replays those events
+in order, selecting the layer at execution and keeping that binding for release.
+Output can therefore be delayed by the tapping term, including complete short
+chords. Nested owners keep the original input times rather than acquiring a new
+term when replay starts.
+
+For release-filtered home-row modifiers and tap-preferred thumbs with 200 ms terms:
+
+```toml
+[behavior.morse]
+buffered_tap_hold = true
+enable_flow_tap = false
+permissive_hold = true
+unilateral_tap = true
+hold_timeout = "200ms"
+quick_tap_timeout = "0ms"
+
+[behavior.morse.profiles]
+THUMB = { normal_mode = true, unilateral_tap = false }
+LEGACY = { buffered_tap_hold = false }
+```
+
+Use `THUMB` on the thumb `LT` bindings and assign hands in `layout.map`. In the
+buffered permissive-hold path, a nested same-hand **release** selects tap; an
+opposite-hand nested release selects hold. A same-hand press alone does not force
+a tap, so a chord held through the term can still hold. Normal thumbs decide only
+on their own release or term. An event at or after the term receives timeout
+resolution first. RMK retains its last-member combo release policy; this and timer
+ties need not match another firmware.
+
+Flow-tap remains a separate policy: when enabled, recent typing can deliberately
+force a tap. Buffering does not undo a tap already emitted by that policy, nor let
+it overtake an older undecided owner.
+
+The capture queue holds 32 events. At exhaustion, RMK degrades the oldest owner
+to a tap to make progress. If legacy held-key ownership is also exhausted, a fresh
+press can degrade to a balanced tap instead of leaving a persistent action down.
+This is recovery, not preservation of typing intent: a degraded Backspace tap can
+delete text.
+
+RMK's storage-reset policy is unchanged. A changed commit or Cargo feature set
+can change the storage schema hash and erase stored settings and BLE bonds,
+requiring re-pairing. With a matching schema, persisted profiles still take
+precedence over compiled defaults.
+
 #### Default profile for Morse/TapDance/TapHold
 
 In the `[behavior.morse]` sub-table you can configure the default profile. If there's no explicit profile applied to a morse key, default profile will be used.

@@ -64,6 +64,8 @@ RMK_FEATURESETS=(
 # Behavioral coverage only; RMK_FEATURESETS remains the compile/clippy matrix.
 RMK_TEST_FEATURESETS=(
     ""
+    "buffered_tap_hold"
+    "buffered_tap_hold,split,vial,storage,async_matrix,_ble"
     "split,dfu_nrf,dfu_split,storage,async_matrix,embassy-nrf/nrf52840"
     "vial,host_lock,_no_usb,steno,passkey_entry"
     "rynk,_ble,split,async_matrix,storage"

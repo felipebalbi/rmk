@@ -134,6 +134,17 @@ steps = [
 ]
 expect = [["LShift", "C"], []]
 
+[[test]]
+name = "buffered_owner_retains_osm_through_its_hold_deadline"
+features = ["buffered_tap_hold"]
+behavior.one_shot = { timeout = "100ms" }
+behavior.morse = { buffered_tap_hold = true, enable_flow_tap = false }
+steps = [
+  { tap = { pos = [0,0], duration = 10 } }, { delay = 40 },
+  { press = [0,3] }, { delay = 300 }, { release = [0,3] },
+]
+expect = [["LShift", "C"], []]
+
 # Two OSMs stack onto the same next key.
 [[test]]
 name = "osm_combined_modifiers"

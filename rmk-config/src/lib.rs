@@ -904,6 +904,7 @@ pub(crate) struct AutoMouseLayerConfig {
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MorseProfile {
+    pub buffered_tap_hold: Option<bool>,
     pub enable_flow_tap: Option<bool>,
 
     /// if true, tap-hold key will always send tap action when tapped with the same hand only
@@ -1030,6 +1031,7 @@ pub(crate) struct ForkConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MorsesConfig {
+    pub buffered_tap_hold: Option<bool>,
     pub enable_flow_tap: Option<bool>, //default: false
     /// used in permissive_hold mode
     pub prior_idle_time: Option<DurationMillis>,

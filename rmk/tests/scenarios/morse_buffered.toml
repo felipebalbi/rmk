@@ -1,0 +1,220 @@
+keyboard = "boards/buffered_tap_hold.toml"
+features = ["buffered_tap_hold"]
+
+[[test]]
+name = "capital_i_after_space_has_no_a"
+steps = [
+  { delay = 1000 },
+  { press = [1,2] }, { delay = 76 }, { release = [1,2] },
+  { delay = 43 }, { press = [0,0] },
+  { delay = 97 }, { press = [0,2] },
+  { delay = 53 }, { release = [0,2] },
+  { delay = 96 }, { release = [0,0] },
+]
+expect = [["Space"], [], ["LShift"], ["LShift","I"], ["LShift"], []]
+
+# Legacy Normal lets a complete pre-term chord escape as base-layer M.
+[[test]]
+name = "early_quote_uses_the_held_thumb_layer"
+steps = [
+  { delay = 1000 },
+  { press = [1,3] }, { delay = 89 }, { press = [0,3] },
+  { delay = 78 }, { release = [0,3] },
+  { delay = 118 }, { release = [1,3] },
+]
+expect = [["LShift","Quote"], []]
+
+# Without capture, permissive-hold rolls let Q overtake S.
+[[test]]
+name = "no_flow_asq_keeps_press_order"
+steps = [
+  { delay = 1000 },
+  { press = [0,0] }, { delay = 30 }, { press = [0,1] },
+  { delay = 30 }, { press = [0,4] },
+  { delay = 30 }, { release = [0,0] },
+  { delay = 30 }, { release = [0,1] },
+  { delay = 30 }, { release = [0,4] },
+]
+expect = [["A"], [], ["S"], ["S","Q"], ["Q"], []]
+
+[[test]]
+name = "thumb_chord_is_silent_until_the_term"
+steps = [
+  { delay = 1000 }, { press = [1,3] },
+  { delay = 89 }, { press = [0,3] },
+  { no_report = 70 }, { release = [0,3] },
+  { delay = 140 }, { release = [1,3] },
+]
+expect = [["LShift","Quote"], []]
+
+[[test]]
+name = "ordinary_tap_controls"
+steps = [
+  { delay = 1000 }, { tap = { pos = [0,0], duration = 40 } },
+  { tap = { pos = [1,0], duration = 40 } },
+  { tap = { pos = [1,3], duration = 40 } },
+]
+expect = [["A"], [], ["Tab"], [], ["Backspace"], []]
+
+[[test]]
+name = "same_hand_nested_release_keeps_tap_down_until_owner_up"
+steps = [
+  { delay = 1000 }, { press = [0,0] },
+  { delay = 30 }, { press = [0,4] },
+  { delay = 30 }, { release = [0,4] },
+  { delay = 30 }, { release = [0,0] },
+]
+expect = [["A"], ["A","Q"], ["A"], []]
+
+[[test]]
+name = "same_hand_press_alone_can_hold_past_the_term"
+steps = [
+  { delay = 1000 }, { press = [0,0] },
+  { delay = 30 }, { press = [0,4] },
+  { delay = 220 }, { release = [0,4] }, { release = [0,0] },
+]
+expect = [["LShift"], ["LShift","Q"], ["LShift"], []]
+
+[[test]]
+name = "opposite_hand_nested_release_commits_hold_first"
+steps = [
+  { delay = 1000 }, { press = [0,0] },
+  { delay = 30 }, { press = [0,2] },
+  { delay = 30 }, { release = [0,2] }, { release = [0,0] },
+]
+expect = [["LShift"], ["LShift","I"], ["LShift"], []]
+
+[[test]]
+name = "three_mt_roll_releases_older_taps_promptly"
+steps = [
+  { delay = 1000 }, { press = [0,0] },
+  { delay = 30 }, { press = [0,1] },
+  { delay = 30 }, { press = [1,4] },
+  { delay = 30 }, { release = [0,0] },
+  { delay = 30 }, { release = [0,1] },
+  { delay = 30 }, { release = [1,4] },
+]
+expect = [["A"], [], ["S"], [], ["D"], []]
+
+[[test]]
+name = "release_at_199ms_taps"
+steps = [{ delay = 1000 }, { press = [0,0] }, { delay = 199 }, { release = [0,0] }]
+expect = [["A"], []]
+
+[[test]]
+name = "release_at_200ms_times_out_first"
+steps = [{ delay = 1000 }, { press = [0,0] }, { delay = 200 }, { release = [0,0] }]
+expect = [["LShift"], []]
+
+[[test]]
+name = "release_at_201ms_holds"
+steps = [{ delay = 1000 }, { press = [0,0] }, { delay = 201 }, { release = [0,0] }]
+expect = [["LShift"], []]
+
+[[test]]
+name = "older_modifier_release_preserves_the_captured_chord"
+steps = [
+  { delay = 1000 }, { press = [0,0] }, { delay = 220 },
+  { press = [1,0] }, { delay = 30 }, { press = [0,3] },
+  { delay = 30 }, { release = [0,0] },
+  { delay = 160 }, { release = [0,3] }, { release = [1,0] },
+]
+expect = [["LShift"], ["LShift","Kc4"], ["Kc4"], []]
+
+[[test]]
+name = "thumb_escape_combo_releases_on_last_member_once"
+steps = [
+  { delay = 1000 }, { press = [1,0] }, { delay = 20 }, { press = [1,1] },
+  { release = [1,0] }, { delay = 60 }, { release = [1,1] },
+]
+expect = [["Escape"], []]
+
+[[test]]
+name = "thumb_delete_combo_is_not_replayed_as_members"
+steps = [
+  { delay = 1000 }, { press = [1,2] }, { delay = 20 }, { press = [1,3] },
+  { release = [1,2] }, { release = [1,3] },
+]
+expect = [["Delete"], []]
+
+[[test]]
+name = "thumb_caps_word_combo_executes_once"
+steps = [
+  { delay = 1000 }, { press = [1,1] }, { delay = 20 }, { press = [1,2] },
+  { release = [1,1] }, { release = [1,2] }, { tap = { pos = [0,2], duration = 20 } },
+]
+expect = [["LShift","I"], []]
+
+[[test]]
+name = "consumed_combo_members_do_not_interrupt_the_hrm"
+steps = [
+  { delay = 1000 }, { press = [0,0] },
+  { delay = 20 }, { press = [1,0] }, { delay = 20 }, { press = [1,1] },
+  { release = [1,0] }, { release = [1,1] }, { no_report = 100 },
+  { delay = 100 }, { release = [0,0] },
+]
+expect = [["LShift"], ["LShift","Escape"], ["LShift"], []]
+
+[[test]]
+name = "both_thumb_holds_enable_tri_layer"
+steps = [
+  { delay = 1000 }, { press = [1,0] }, { delay = 70 }, { press = [1,3] },
+  { delay = 220 }, { tap = { pos = [0,3], duration = 20 } },
+  { release = [1,3] }, { release = [1,0] },
+]
+expect = [["F1"], []]
+
+[[test]]
+name = "fork_replacing_a_buffered_mt_executes_the_plain_binding_once"
+behavior.fork.forks = [
+  { trigger = "MT(A,LShift)", negative_output = "Z", positive_output = "X", match_any = "CapsLock" },
+]
+steps = [{ delay = 1000 }, { press = [0,0] }, { delay = 250 }, { release = [0,0] }]
+expect = [["Z"], []]
+
+[[test]]
+name = "disabling_buffering_does_not_abandon_a_committed_layer_release"
+features = ["rynk"]
+steps = [
+  { delay = 1000 }, { press = [1,0] }, { delay = 250 },
+  { rynk = { cmd = "SetBehaviorConfig", payload = { combo_timeout_ms = 50, oneshot_timeout_ms = 1000, tap_interval_ms = 200, tap_capslock_interval_ms = 250, morse_default_profile = { buffered_tap_hold = false, enable_flow_tap = false, mode = "Normal", hold_timeout_ms = 200 }, morse_prior_idle_time_ms = 120 } } },
+  { release = [1,0] }, { tap = { pos = [0,3], duration = 20 } },
+]
+expect = [["M"], []]
+
+[[test]]
+name = "enabling_buffering_releases_the_action_selected_by_the_legacy_layer_hold"
+features = ["rynk"]
+behavior.morse.buffered_tap_hold = false
+behavior.morse.permissive_hold = false
+behavior.morse.hold_on_other_press = true
+behavior.morse.profiles.THUMB = { normal_mode = false, hold_on_other_press = true }
+steps = [
+  { rynk = { cmd = "SetKeyAction", payload = { position = { layer = 1, row = 0, col = 3 }, action = { Single = { LayerOn = 2 } } } } },
+  { delay = 1000 }, { press = [1,0] }, { delay = 20 }, { press = [0,3] },
+  { rynk = { cmd = "SetBehaviorConfig", payload = { combo_timeout_ms = 50, oneshot_timeout_ms = 1000, tap_interval_ms = 200, tap_capslock_interval_ms = 250, morse_default_profile = { buffered_tap_hold = true, enable_flow_tap = false, mode = "Normal", hold_timeout_ms = 200 }, morse_prior_idle_time_ms = 120 } } },
+  { release = [0,3] }, { release = [1,0] }, { tap = { pos = [0,3], duration = 20 } },
+]
+expect = [["M"], []]
+
+[[test]]
+name = "enabling_buffering_keeps_an_older_modifier_release"
+features = ["rynk"]
+behavior.morse.buffered_tap_hold = false
+steps = [
+  { delay = 1000 }, { press = [0,0] }, { delay = 250 },
+  { rynk = { cmd = "SetBehaviorConfig", payload = { combo_timeout_ms = 50, oneshot_timeout_ms = 1000, tap_interval_ms = 200, tap_capslock_interval_ms = 250, morse_default_profile = { buffered_tap_hold = true, enable_flow_tap = false, mode = "Normal", hold_timeout_ms = 200 }, morse_prior_idle_time_ms = 120 } } },
+  { release = [0,0] },
+]
+expect = [["LShift"], []]
+
+[[test]]
+name = "enabling_buffering_keeps_an_older_layer_release"
+features = ["rynk"]
+behavior.morse.buffered_tap_hold = false
+steps = [
+  { delay = 1000 }, { press = [1,0] }, { delay = 250 },
+  { rynk = { cmd = "SetBehaviorConfig", payload = { combo_timeout_ms = 50, oneshot_timeout_ms = 1000, tap_interval_ms = 200, tap_capslock_interval_ms = 250, morse_default_profile = { buffered_tap_hold = true, enable_flow_tap = false, mode = "Normal", hold_timeout_ms = 200 }, morse_prior_idle_time_ms = 120 } } },
+  { release = [1,0] }, { tap = { pos = [0,3], duration = 20 } },
+]
+expect = [["M"], []]

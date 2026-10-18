@@ -1,0 +1,54 @@
+[layout]
+rows = 2
+cols = 5
+map = """
+(0,0,L) (0,1,L) (0,2,R) (0,3,R) (0,4,L)
+(1,0,L) (1,1,L) (1,2,R) (1,3,R) (1,4,L)
+"""
+
+[behavior]
+tri_layer = [1, 2, 3]
+
+[behavior.combo]
+timeout = "50ms"
+combos = [
+  { actions = ["LT(1,Tab,THUMB)", "Enter"], output = "Escape" },
+  { actions = ["Space", "LT(2,Backspace,THUMB)"], output = "Delete" },
+  { actions = ["Enter", "Space"], output = "CapsWordToggle" },
+]
+
+[behavior.morse]
+buffered_tap_hold = true
+enable_flow_tap = false
+permissive_hold = true
+unilateral_tap = true
+hold_timeout = "200ms"
+quick_tap_timeout = "0ms"
+
+[behavior.morse.profiles]
+THUMB = { normal_mode = true, unilateral_tap = false }
+LEGACY = { buffered_tap_hold = false }
+
+[[keymap.layer]]
+keys = """
+MT(A,LShift) MT(S,LAlt) I M Q
+LT(1,Tab,THUMB) Enter Space LT(2,Backspace,THUMB) MT(D,LGui)
+"""
+
+[[keymap.layer]]
+keys = """
+1 2 3 4 5
+_ _ _ _ _
+"""
+
+[[keymap.layer]]
+keys = """
+LeftBracket No No WM(Quote,LShift) No
+_ _ RCtrl _ _
+"""
+
+[[keymap.layer]]
+keys = """
+No No No F1 No
+_ _ _ _ _
+"""

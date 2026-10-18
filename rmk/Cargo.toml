@@ -18,6 +18,8 @@ features = ["split", "vial", "async_matrix", "_ble"]
 doctest = false
 
 [features]
+## Retain following events behind an opted-in physical tap-hold key.
+buffered_tap_hold = []
 default = ["defmt", "storage", "vial", "host_lock", "watchdog"]
 
 ## Enable hardware watchdog support

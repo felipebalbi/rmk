@@ -170,7 +170,7 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
 enum SimStep {
     Event(KeyboardEvent),
     Delay(Duration),
-    ExpectReport(Report),
+    ExpectReport(Report, Duration),
     ExpectNoReport(Duration),
     HostSend(Vec<u8>),
     ExpectHostFrame(Vec<u8>),
@@ -273,7 +273,17 @@ impl SimKeyboard {
     }
 
     pub fn expect_report(&mut self, report: Report) -> &mut Self {
-        self.steps.push(SimStep::ExpectReport(report));
+        self.steps.push(SimStep::ExpectReport(report, TIMEOUT));
+        self
+    }
+
+    /// Bound a report's arrival time, not just its place in the eventual trace.
+    pub fn expect_keys_within<const N: usize>(&mut self, keycodes: [HidKeyCode; N], ms: u64) -> &mut Self {
+        self.expect_keys(keycodes);
+        let Some(SimStep::ExpectReport(_, timeout)) = self.steps.last_mut() else {
+            unreachable!()
+        };
+        *timeout = Duration::from_millis(ms);
         self
     }
 
@@ -391,6 +401,8 @@ impl SimKeyboard {
             Either::Second(()) => {}
         }
         self.ble_profile_actions = profile_actions;
+        #[cfg(feature = "buffered_tap_hold")]
+        rmk::test_support::assert_buffered_idle(&self.keyboard);
 
         assert!(
             self.keyboard.held_buffer.is_empty(),
@@ -435,14 +447,18 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
                 with_timeout(sender.publish_async(event), &waiting).await;
             }
             SimStep::Delay(duration) => Timer::after(duration).await,
-            SimStep::ExpectReport(expected) => {
+            SimStep::ExpectReport(expected, timeout) => {
                 let at = format!("expect[{expects}]");
                 expects += 1;
                 let waiting = format!(
-                    "{at}: no HID report within {TIMEOUT_SECS}s, expected {}",
+                    "{at}: no HID report within {}ms, expected {}",
+                    timeout.as_millis(),
                     summary(&expected)
                 );
-                let actual = with_timeout(REPORT_CHANNEL.receive(), &waiting).await;
+                let actual = match select(Timer::after(timeout), REPORT_CHANNEL.receive()).await {
+                    Either::First(_) => panic!("{waiting}"),
+                    Either::Second(report) => report,
+                };
                 if !same_report(&expected, &actual) {
                     panic!(
                         "{at}: HID report mismatch\n  expected {}\n    actual {}",

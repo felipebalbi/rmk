@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use quote::{format_ident, quote};
-use rmk_config::resolved::Behavior;
 use rmk_config::resolved::behavior::{
     AutoMouseLayer, Combos, Forks, MacroOperation, Macros, Morse, MorseActionPair, MorseKey,
     MorseProfile, OneShot,
 };
+use rmk_config::resolved::Behavior;
 
 use super::action_parser::{
-    SetterTable, expand_profile, expand_profile_name, get_key_with_alias, parse_action, parse_key,
-    parse_name_list, sorted_profile_names,
+    expand_profile, expand_profile_name, get_key_with_alias, parse_action, parse_key,
+    parse_name_list, sorted_profile_names, SetterTable,
 };
 
 fn expand_tri_layer(tri_layer: &Option<[u8; 3]>) -> proc_macro2::TokenStream {
@@ -535,6 +535,22 @@ fn expand_auto_mouse_layer(auto_mouse_layer: &[AutoMouseLayer]) -> proc_macro2::
 }
 
 pub(crate) fn expand_behavior_config(behavior: &Behavior) -> proc_macro2::TokenStream {
+    let buffered_guard = if behavior.morse.as_ref().is_some_and(|morse| {
+        morse.default_profile.buffered_tap_hold == Some(true)
+            || morse
+                .profiles
+                .values()
+                .any(|profile| profile.buffered_tap_hold == Some(true))
+    }) {
+        quote! {
+            const _: () = assert!(
+                ::rmk::BUFFERED_TAP_HOLD_ENABLED,
+                "keyboard.toml: buffered_tap_hold requires the rmk/buffered_tap_hold Cargo feature",
+            );
+        }
+    } else {
+        quote! {}
+    };
     let profiles = behavior
         .morse
         .as_ref()
@@ -551,6 +567,7 @@ pub(crate) fn expand_behavior_config(behavior: &Behavior) -> proc_macro2::TokenS
     let auto_mouse_layer = expand_auto_mouse_layer(&behavior.auto_mouse_layer);
 
     quote! {
+        #buffered_guard
         #[allow(clippy::needless_update)]
         let mut behavior_config = ::rmk::config::BehaviorConfig {
             tri_layer: #tri_layer,
@@ -571,6 +588,87 @@ pub(crate) fn expand_behavior_config(behavior: &Behavior) -> proc_macro2::TokenS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_opt_in_checks_the_target_feature() {
+        let path = std::env::temp_dir().join(format!(
+            "rmk-buffered-guard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let profile = |buffered_tap_hold| MorseProfile {
+            buffered_tap_hold,
+            enable_flow_tap: None,
+            unilateral_tap: None,
+            permissive_hold: None,
+            hold_on_other_press: None,
+            normal_mode: None,
+            hold_timeout_ms: None,
+            gap_timeout_ms: None,
+            quick_tap_timeout_ms: None,
+        };
+        for (default_flag, named_flag, needs_feature) in [
+            (Some(true), None, true),
+            (None, Some(true), true),
+            (Some(false), None, false),
+            (None, None, false),
+        ] {
+            let behavior = Behavior {
+                tri_layer: None,
+                one_shot_timeout_ms: None,
+                one_shot_modifiers: None,
+                combos: None,
+                macros: None,
+                forks: None,
+                auto_mouse_layer: vec![],
+                morse: Some(Morse {
+                    enable_flow_tap: false,
+                    prior_idle_time_ms: 120,
+                    default_profile: profile(default_flag),
+                    profiles: HashMap::from([("THUMB".into(), profile(named_flag))]),
+                    morses: vec![],
+                }),
+            };
+            let tokens = expand_behavior_config(&behavior);
+            let block: syn::Block = syn::parse2(quote! {{ #tokens }}).unwrap();
+            let guard = block.stmts.iter().find_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Const(item)) => Some(quote! { #item }),
+                _ => None,
+            });
+            assert_eq!(guard.is_some(), needs_feature);
+            if let Some(guard) = guard {
+                for enabled in [false, true] {
+                    let source = path.join("guard.rs");
+                    std::fs::write(&source, format!(
+                        "extern crate self as rmk; pub const BUFFERED_TAP_HOLD_ENABLED: bool = {enabled}; {guard} fn main() {{}}"
+                    )).unwrap();
+                    let output = std::process::Command::new("rustc")
+                        .arg("--edition=2024")
+                        .arg("--emit=metadata")
+                        .arg(&source)
+                        .arg("-o")
+                        .arg(path.join("guard.rmeta"))
+                        .output()
+                        .unwrap();
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert_eq!(output.status.success(), enabled, "{stderr}");
+                    if !enabled {
+                        assert!(
+                            stderr.contains(
+                                "buffered_tap_hold requires the rmk/buffered_tap_hold Cargo feature"
+                            ),
+                            "{stderr}"
+                        );
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn parse_state_combination_sets_bits_for_valid_states() {

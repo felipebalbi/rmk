@@ -96,6 +96,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn buffered_behavior_flags_round_trip_through_storage() {
+        for flag in [Some(true), Some(false), None] {
+            let mut behavior = crate::config::BehaviorConfig::default();
+            behavior.morse.default_profile = behavior.morse.default_profile.with_buffered_tap_hold(flag);
+            let value = StorageValue::BehaviorConfig((&behavior).into());
+            let mut buffer = [0; 64];
+            let size = Value::serialize_into(&value, &mut buffer).unwrap();
+            let StorageValue::BehaviorConfig(decoded) = StorageValue::deserialize_from(&buffer[..size]).unwrap().0
+            else {
+                panic!("decoded as another variant");
+            };
+            assert_eq!(decoded.morse_default_profile.buffered_tap_hold(), flag);
+        }
+    }
+
     /// Every shape of `Morse` a host can write has to survive the round trip:
     /// Vial's four fixed actions, a partly filled table, and raw morse patterns.
     #[test]
