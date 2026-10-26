@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 
 use quote::{format_ident, quote};
+use rmk_config::resolved::Behavior;
 use rmk_config::resolved::behavior::{
     AutoMouseLayer, Combos, Forks, MacroOperation, Macros, Morse, MorseActionPair, MorseKey,
     MorseProfile, OneShot,
 };
-use rmk_config::resolved::Behavior;
 
 use super::action_parser::{
-    expand_profile, expand_profile_name, get_key_with_alias, parse_action, parse_key,
-    parse_name_list, sorted_profile_names, SetterTable,
+    SetterTable, expand_profile, expand_profile_name, get_key_with_alias, parse_action, parse_key,
+    parse_name_list, sorted_profile_names,
 };
 
 fn expand_tri_layer(tri_layer: &Option<[u8; 3]>) -> proc_macro2::TokenStream {
@@ -113,7 +113,9 @@ fn expand_morse(
                 .chain(config.profiles.values())
                 .any(|profile| profile.buffered_tap_hold == Some(true))
         {
-            panic!("keyboard.toml: buffered_tap_hold = true requires the `buffered_tap_hold` Cargo feature");
+            panic!(
+                "keyboard.toml: buffered_tap_hold = true requires the `buffered_tap_hold` Cargo feature"
+            );
         }
         let enable_flow_tap = config.enable_flow_tap;
         let enable_flow_tap_token = quote! { enable_flow_tap: #enable_flow_tap, };
