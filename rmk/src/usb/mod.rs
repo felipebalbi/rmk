@@ -50,7 +50,7 @@ pub(crate) static USB_REMOTE_WAKEUP: Signal<RawMutex, ()> = Signal::new();
 
 // Set while the host has selected the boot protocol (BIOS, UEFI, some KVMs).
 // Such a host reads only the boot keyboard interface, never the composite one.
-static BOOT_PROTOCOL: AtomicBool = AtomicBool::new(false);
+static BOOT_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Serves one framed session over the USB byte stream: the keyboard's Vial or
 /// Rynk service, the dongle's router, or `()` in a build that serves none.
@@ -120,7 +120,7 @@ impl<'d, D: Driver<'d>> UsbKeyboardWriter<'_, 'd, D> {
             .map_err(|_| HidError::ReportSerializeError)?;
         // A boot protocol host never drains this endpoint, and a blocked write here
         // would hold up the keyboard reports queued behind it.
-        if BOOT_PROTOCOL.load(Ordering::Relaxed) {
+        if BOOT_MODE.load(Ordering::Relaxed) {
             return Ok(n);
         }
         self.other_writer
@@ -643,7 +643,7 @@ impl RequestHandler for UsbRequestHandler {
     }
 
     fn get_protocol(&self) -> HidProtocolMode {
-        if BOOT_PROTOCOL.load(Ordering::Relaxed) {
+        if BOOT_MODE.load(Ordering::Relaxed) {
             HidProtocolMode::Boot
         } else {
             HidProtocolMode::Report
@@ -654,7 +654,7 @@ impl RequestHandler for UsbRequestHandler {
         // KeyboardReport is already the 8-byte boot keyboard layout, so the
         // mode only changes what GET_PROTOCOL answers and whether composite
         // reports are sent.
-        BOOT_PROTOCOL.store(protocol == HidProtocolMode::Boot, Ordering::Relaxed);
+        BOOT_MODE.store(protocol == HidProtocolMode::Boot, Ordering::Relaxed);
         OutResponse::Accepted
     }
 }
@@ -687,7 +687,7 @@ impl Handler for UsbDeviceHandler {
     }
 
     fn reset(&mut self) {
-        BOOT_PROTOCOL.store(false, Ordering::Relaxed);
+        BOOT_MODE.store(false, Ordering::Relaxed);
         self.pre_suspend = UsbState::Enabled;
         set_usb_state(UsbState::Enabled);
         info!("Bus reset, the Vbus current limit is 100mA");
