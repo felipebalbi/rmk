@@ -582,9 +582,7 @@ macro_rules! usb_hid_state_and_config {
 
         let state = paste::paste! { [<$descriptor:snake:upper _STATE>].init(::embassy_usb::class::hid::State::new()) };
         let request_handler = paste::paste! {
-            [<$descriptor:snake:upper _HANDLER>].init($crate::usb::UsbRequestHandler {
-                protocol: ::embassy_usb::class::hid::HidProtocolMode::Report,
-            })
+            [<$descriptor:snake:upper _HANDLER>].init($crate::usb::UsbRequestHandler)
         };
 
         let hid_config = ::embassy_usb::class::hid::Config {
@@ -636,9 +634,7 @@ pub(crate) use add_usb_reader_writer;
 pub(crate) use add_usb_writer;
 pub(crate) use usb_hid_state_and_config;
 
-pub(crate) struct UsbRequestHandler {
-    pub(crate) protocol: HidProtocolMode,
-}
+pub(crate) struct UsbRequestHandler;
 
 impl RequestHandler for UsbRequestHandler {
     fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
@@ -647,15 +643,17 @@ impl RequestHandler for UsbRequestHandler {
     }
 
     fn get_protocol(&self) -> HidProtocolMode {
-        self.protocol
+        if BOOT_PROTOCOL.load(Ordering::Relaxed) {
+            HidProtocolMode::Boot
+        } else {
+            HidProtocolMode::Report
+        }
     }
 
     fn set_protocol(&mut self, protocol: HidProtocolMode) -> OutResponse {
         // KeyboardReport is already the 8-byte boot keyboard layout, so the
-        // mode only changes what GET_PROTOCOL answers.
-        // TODO: Return to Report on a bus reset once embassy-usb tells the
-        // request handler about it (embassy-rs/embassy#6891).
-        self.protocol = protocol;
+        // mode only changes what GET_PROTOCOL answers and whether composite
+        // reports are sent.
         BOOT_PROTOCOL.store(protocol == HidProtocolMode::Boot, Ordering::Relaxed);
         OutResponse::Accepted
     }
@@ -764,15 +762,18 @@ mod tests {
     /// subclass the interface advertises.
     #[test]
     fn the_keyboard_switches_protocol_and_reports_it() {
-        let mut handler = UsbRequestHandler {
-            protocol: HidProtocolMode::Report,
-        };
+        let mut handler = UsbRequestHandler;
         assert_eq!(handler.get_protocol(), HidProtocolMode::Report);
 
         assert_eq!(handler.set_protocol(HidProtocolMode::Boot), OutResponse::Accepted);
         assert_eq!(handler.get_protocol(), HidProtocolMode::Boot);
 
         assert_eq!(handler.set_protocol(HidProtocolMode::Report), OutResponse::Accepted);
+        assert_eq!(handler.get_protocol(), HidProtocolMode::Report);
+
+        // A bus reset returns the device to the default report protocol.
+        handler.set_protocol(HidProtocolMode::Boot);
+        UsbDeviceHandler::new().reset();
         assert_eq!(handler.get_protocol(), HidProtocolMode::Report);
     }
 
