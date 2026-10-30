@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use embassy_futures::join::join5;
 use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
@@ -45,6 +47,10 @@ use rynk as host_usb;
 use vial as host_usb;
 
 pub(crate) static USB_REMOTE_WAKEUP: Signal<RawMutex, ()> = Signal::new();
+
+// Set while the host has selected the boot protocol (BIOS, UEFI, some KVMs).
+// Such a host reads only the boot keyboard interface, never the composite one.
+static BOOT_PROTOCOL: AtomicBool = AtomicBool::new(false);
 
 /// Serves one framed session over the USB byte stream: the keyboard's Vial or
 /// Rynk service, the dongle's router, or `()` in a build that serves none.
@@ -112,6 +118,11 @@ impl<'d, D: Driver<'d>> UsbKeyboardWriter<'_, 'd, D> {
         let n = report
             .serialize(&mut buf[1..])
             .map_err(|_| HidError::ReportSerializeError)?;
+        // A boot protocol host never drains this endpoint, and a blocked write here
+        // would hold up the keyboard reports queued behind it.
+        if BOOT_PROTOCOL.load(Ordering::Relaxed) {
+            return Ok(n);
+        }
         self.other_writer
             .write(&buf[0..n + 1])
             .await
@@ -645,6 +656,7 @@ impl RequestHandler for UsbRequestHandler {
         // TODO: Return to Report on a bus reset once embassy-usb tells the
         // request handler about it (embassy-rs/embassy#6891).
         self.protocol = protocol;
+        BOOT_PROTOCOL.store(protocol == HidProtocolMode::Boot, Ordering::Relaxed);
         OutResponse::Accepted
     }
 }
@@ -677,6 +689,7 @@ impl Handler for UsbDeviceHandler {
     }
 
     fn reset(&mut self) {
+        BOOT_PROTOCOL.store(false, Ordering::Relaxed);
         self.pre_suspend = UsbState::Enabled;
         set_usb_state(UsbState::Enabled);
         info!("Bus reset, the Vbus current limit is 100mA");
