@@ -170,6 +170,45 @@ DEFMT_LOG = "trace"
 
 run `cargo clean` and then `cargo run --release`. Open an [issue](https://github.com/rmk-rs/rmk/issues) with the detailed logs.
 
+### How do I configure the nRF52 low-frequency clock?
+
+Use `#[Override(chip_config)]` to supply the Embassy configuration and
+`#[Override(mpsl_lfclk_config)]` to supply MPSL's LF-clock configuration. These
+hooks preserve RMK's generated BLE initialization and work in both central and
+peripheral modules. `#[Override(chip_init)]` still replaces the entire startup.
+
+For a board with an external 32.768 kHz crystal:
+
+```rust
+#[Override(chip_config)]
+fn chip_config() -> embassy_nrf::config::Config {
+    let mut config = embassy_nrf::config::Config::default();
+    config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+    // Set any DC/DC and regulator options required by your board here.
+    config
+}
+
+#[Override(mpsl_lfclk_config)]
+fn lfclk_config() -> nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
+    nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
+        source: nrf_sdc::mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+        rc_ctiv: 0,
+        rc_temp_ctiv: 0,
+        accuracy_ppm: 50,
+        skip_wait_lfclk_started: false,
+    }
+}
+```
+
+Set `accuracy_ppm` to a bound supported by your crystal, including temperature
+and load effects; `50` is an example, not a guarantee for every board. Both RC
+calibration fields must be zero when the source is not RC. Select the same LF
+source in Embassy and MPSL.
+
+The chip hook supplies a complete HAL configuration; TOML chip defaults are not
+applied on top of it. Without either hook, RMK keeps its existing clock defaults.
+The MPSL hook is available only for nRF52 BLE keyboards.
+
 ### I see "ERROR: Storage is full" error in the log
 
 By default, RMK uses only a few sectors of your microcontroller's internal flash: `num_sectors` defaults to 8 when a `[dfu]` section is present, either in your `keyboard.toml` or in the chip default (nRF52840, nice!nano, RP2040 and Pico W ship one), otherwise 2. The Rust API `StorageConfig::default()` is 2. You may get the following error if the sectors are not big enough to store all your keymaps:

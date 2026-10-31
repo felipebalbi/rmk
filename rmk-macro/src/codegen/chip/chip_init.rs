@@ -2,8 +2,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, quote};
 use rmk_config::DcdcReg0Voltage;
 use rmk_config::resolved::Hardware;
-use rmk_config::resolved::hardware::{BoardConfig, ChipModel, ChipSeries, CommunicationConfig};
-use syn::{ItemFn, ItemMod};
+use rmk_config::resolved::hardware::{BoardConfig, ChipSeries, CommunicationConfig};
+use syn::ItemMod;
 
 use crate::codegen::override_helper::{Overwritten, find_overwritten};
 
@@ -16,44 +16,69 @@ pub(crate) fn expand_chip_init(
     peripheral_id: Option<usize>,
     item_mod: &ItemMod,
 ) -> TokenStream2 {
-    // If there is a function with `#[Overwritten(usb)]`, override the chip initialization
+    let mut chip_config = None;
+    let mut mpsl_lfclk_config = None;
+    let mut chip_init = None;
     if let Some((_, items)) = &item_mod.content {
-        items
-            .iter()
-            .find_map(|item| {
-                if let syn::Item::Fn(item_fn) = &item
-                    && let Some(Ok(overwritten)) = find_overwritten(item_fn)
-                {
-                    match overwritten {
-                        Overwritten::ChipConfig => {
-                            return Some(override_chip_config(&hardware.chip, item_fn));
+        for item in items {
+            if let syn::Item::Fn(item_fn) = item
+                && let Some(Ok(overwritten)) = find_overwritten(item_fn)
+            {
+                match overwritten {
+                    Overwritten::ChipConfig => chip_config = Some(item_fn.block.to_token_stream()),
+                    Overwritten::MpslLfclkConfig => {
+                        if !matches!(hardware.chip.series, ChipSeries::Nrf52)
+                            || !hardware.communication.ble_enabled()
+                        {
+                            return syn::Error::new_spanned(
+                                item_fn,
+                                "mpsl_lfclk_config requires an nRF52 BLE keyboard",
+                            )
+                            .to_compile_error();
                         }
-                        Overwritten::ChipInit => {
-                            // Override the whole chip initialization
-                            let stmts = &item_fn.block.stmts;
-                            return Some(quote! { #(#stmts)* });
-                        }
-                        _ => (),
+                        mpsl_lfclk_config = Some(item_fn.block.to_token_stream());
                     }
+                    Overwritten::ChipInit => {
+                        let stmts = &item_fn.block.stmts;
+                        chip_init = Some(quote! { #(#stmts)* });
+                    }
+                    _ => (),
                 }
-                None
-            })
-            .unwrap_or(chip_init_default(hardware, peripheral_id))
-    } else {
+            }
+        }
+    }
+    if let Some(chip_init) = chip_init {
+        chip_init
+    } else if chip_config.is_none() && mpsl_lfclk_config.is_none() {
         chip_init_default(hardware, peripheral_id)
+    } else {
+        chip_init_with_config(hardware, peripheral_id, chip_config, mpsl_lfclk_config)
     }
 }
 
 // Default implementations of chip initialization
 pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize>) -> TokenStream2 {
+    chip_init_with_config(hardware, peripheral_id, None, None)
+}
+
+fn chip_init_with_config(
+    hardware: &Hardware,
+    peripheral_id: Option<usize>,
+    chip_config: Option<TokenStream2>,
+    mpsl_lfclk_config: Option<TokenStream2>,
+) -> TokenStream2 {
     let chip = &hardware.chip;
     let communication = &hardware.communication;
     let peri_num = hardware.board.get_num_peripheral();
     match chip.series {
-        ChipSeries::Stm32 => quote! {
-                let config = ::embassy_stm32::Config::default();
+        ChipSeries::Stm32 => {
+            let config =
+                chip_config.unwrap_or_else(|| quote! { ::embassy_stm32::Config::default() });
+            quote! {
+                let config = #config;
                 let mut p = ::embassy_stm32::init(config);
-        },
+            }
+        }
         ChipSeries::Nrf52 => {
             let chip_cfg = &hardware.chip_config;
             let dcdc_config = if chip.chip == "nrf52840" {
@@ -92,6 +117,23 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             } else {
                 quote! {}
             };
+            let chip_config = match chip_config {
+                Some(config) => quote! { let config = #config; },
+                None => quote! {
+                    let mut config = ::embassy_nrf::config::Config::default();
+                    #dcdc_config
+                },
+            };
+            let mpsl_lfclk_config = mpsl_lfclk_config.unwrap_or_else(|| quote! {
+                ::nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
+                    source: ::nrf_sdc::mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
+                    rc_ctiv: ::nrf_sdc::mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
+                    rc_temp_ctiv: ::nrf_sdc::mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
+                    // nRF52 LFRC is +/-500 ppm after calibration.
+                    accuracy_ppm: 500,
+                    skip_wait_lfclk_started: ::nrf_sdc::mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
+                }
+            });
             let ble_addr = get_ble_addr(hardware, peripheral_id);
             let central_links = if peripheral_id.is_some() { 0 } else { peri_num };
             let peripheral_links = if peripheral_id.is_some() {
@@ -103,15 +145,7 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 CommunicationConfig::Ble(_) | CommunicationConfig::Both(_, _) => quote! {
                     // Initialize nrf-sdc and ble stack
                     let mpsl_p = ::nrf_sdc::mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
-                    let lfclk_cfg = ::nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
-                        source: ::nrf_sdc::mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
-                        rc_ctiv: ::nrf_sdc::mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
-                        rc_temp_ctiv: ::nrf_sdc::mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
-                        // nRF52 LFRC is +/-500 ppm after calibration (PS 5.4.4.4); the 250 ppm
-                        // MPSL default understates it and narrows the receive window on the peer.
-                        accuracy_ppm: 500,
-                        skip_wait_lfclk_started: ::nrf_sdc::mpsl::raw::MPSL_DEFAULT_SKIP_WAIT_LFCLK_STARTED != 0,
-                    };
+                    let lfclk_cfg = #mpsl_lfclk_config;
                     static MPSL: ::static_cell::StaticCell<::nrf_sdc::mpsl::MultiprotocolServiceLayer> = ::static_cell::StaticCell::new();
                     static SESSION_MEM: ::static_cell::StaticCell<::nrf_sdc::mpsl::SessionMem<1>> = ::static_cell::StaticCell::new();
                     let mpsl = MPSL.init(::defmt::unwrap!(::nrf_sdc::mpsl::MultiprotocolServiceLayer::with_timeslots(
@@ -134,17 +168,18 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             };
             quote! {
                 use embassy_nrf::interrupt::InterruptExt;
-                let mut config = ::embassy_nrf::config::Config::default();
-                #dcdc_config
+                #chip_config
                 let p = ::embassy_nrf::init(config);
                 #ble_init
             }
         }
         ChipSeries::Rp2040 => {
+            let config =
+                chip_config.unwrap_or_else(|| quote! { ::embassy_rp::config::Config::default() });
             let ble_addr = get_ble_addr(hardware, peripheral_id);
             if communication.ble_enabled() {
                 quote! {
-                    let config = ::embassy_rp::config::Config::default();
+                    let config = #config;
                     #[allow(unused_mut)]
                     let mut p = ::embassy_rp::init(config);
 
@@ -195,13 +230,18 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 }
             } else {
                 quote! {
-                    let config = ::embassy_rp::config::Config::default();
+                    let config = #config;
                     #[allow(unused_mut)]
                     let mut p = ::embassy_rp::init(config);
                 }
             }
         }
         ChipSeries::Esp32 => {
+            let config = chip_config.unwrap_or_else(|| {
+                quote! {
+                    ::esp_hal::Config::default().with_cpu_clock(::esp_hal::clock::CpuClock::max())
+                }
+            });
             let ble_addr = get_ble_addr(hardware, peripheral_id);
             let battery = match peripheral_id {
                 Some(id) => &hardware.peripheral_batteries[id],
@@ -215,7 +255,7 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             };
             quote! {
                 ::esp_println::logger::init_logger_from_env();
-                let p = ::esp_hal::init(::esp_hal::Config::default().with_cpu_clock(::esp_hal::clock::CpuClock::max()));
+                let p = ::esp_hal::init(#config);
                 ::esp_alloc::heap_allocator!(size: 72 * 1024);
                 let timg0 = ::esp_hal::timer::timg::TimerGroup::new(p.TIMG0);
                 ::esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
@@ -226,29 +266,6 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             }
         }
     }
-}
-
-fn override_chip_config(chip: &ChipModel, item_fn: &ItemFn) -> TokenStream2 {
-    let initialization = item_fn.block.to_token_stream();
-    let mut initialization_tokens = quote! {
-        let config = #initialization;
-    };
-    match chip.series {
-        ChipSeries::Stm32 => initialization_tokens.extend(quote! {
-            let mut p = ::embassy_stm32::init(config);
-        }),
-        ChipSeries::Nrf52 => initialization_tokens.extend(quote! {
-            let mut p = ::embassy_nrf::init(config);
-        }),
-        ChipSeries::Rp2040 => initialization_tokens.extend(quote! {
-            let mut p = ::embassy_rp::init(config);
-        }),
-        ChipSeries::Esp32 => initialization_tokens.extend(quote! {
-            let p = ::esp_hal::init(::esp_hal::Config::default().with_cpu_clock(::esp_hal::clock::CpuClock::max()));
-        }),
-    }
-
-    initialization_tokens
 }
 
 fn get_ble_addr(hardware: &Hardware, peripheral_id: Option<usize>) -> TokenStream2 {
@@ -303,6 +320,169 @@ mod tests {
     use rmk_config::KeyboardTomlConfig;
 
     use super::chip_init_default;
+
+    fn board_hardware(example: &str) -> rmk_config::resolved::Hardware {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../examples/use_config/{example}/keyboard.toml"));
+        KeyboardTomlConfig::new_from_toml_path(&path)
+            .hardware()
+            .unwrap()
+    }
+
+    fn binding_names(tokens: proc_macro2::TokenStream) -> Vec<String> {
+        let block: syn::Block = syn::parse2(quote! {{ #tokens }}).unwrap();
+        block
+            .stmts
+            .iter()
+            .filter_map(|stmt| {
+                let syn::Stmt::Local(local) = stmt else {
+                    return None;
+                };
+                let pat = match &local.pat {
+                    syn::Pat::Type(typed) => &*typed.pat,
+                    pat => pat,
+                };
+                let syn::Pat::Ident(ident) = pat else {
+                    return None;
+                };
+                Some(ident.ident.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chip_config_override_preserves_nrf_ble_initialization_on_both_split_roles() {
+        let hardware = board_hardware("nrf52840_ble_split");
+        let module = syn::parse2(quote! {
+            mod keyboard {
+                #[Override(chip_config)]
+                fn config() -> embassy_nrf::config::Config {
+                    let mut config = embassy_nrf::config::Config::default();
+                    config.lfclk_source = embassy_nrf::config::LfclkSource::ExternalXtal;
+                    config
+                }
+            }
+        })
+        .unwrap();
+        for id in [None, Some(0)] {
+            let tokens = super::expand_chip_init(&hardware, id, &module);
+            let names = binding_names(tokens.clone());
+            for required in [
+                "p",
+                "lfclk_cfg",
+                "mpsl",
+                "rng",
+                "sdc_mem",
+                "ble_controller",
+                "ble_addr",
+            ] {
+                assert!(
+                    names.iter().any(|name| name == required),
+                    "missing {required}: {tokens}"
+                );
+            }
+            assert_eq!(names.iter().filter(|name| *name == "p").count(), 1);
+            assert!(tokens.to_string().contains("ExternalXtal"));
+        }
+    }
+
+    #[test]
+    fn chip_config_override_preserves_pico_w_ble_initialization() {
+        let hardware = board_hardware("pi_pico_w_ble");
+        let module = syn::parse2(quote! {
+            mod keyboard {
+                #[Override(chip_config)]
+                fn config() -> embassy_rp::config::Config { embassy_rp::config::Config::default() }
+            }
+        })
+        .unwrap();
+        let tokens = super::expand_chip_init(&hardware, None, &module);
+        let names = binding_names(tokens.clone());
+        assert!(
+            names.iter().any(|name| name == "ble_controller"),
+            "{tokens}"
+        );
+        assert!(names.iter().any(|name| name == "ble_addr"), "{tokens}");
+    }
+
+    #[test]
+    fn mpsl_lfclk_override_composes_with_chip_config_in_either_declaration_order() {
+        let hardware = board_hardware("nrf52840_ble_split");
+        let chip = quote! {
+            #[Override(chip_config)]
+            fn chip_config() -> embassy_nrf::config::Config { embassy_nrf::config::Config::default() }
+        };
+        let mpsl = quote! {
+            #[Override(mpsl_lfclk_config)]
+            fn lfclk_config() -> nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
+                nrf_sdc::mpsl::raw::mpsl_clock_lfclk_cfg_t {
+                    source: nrf_sdc::mpsl::raw::MPSL_CLOCK_LF_SRC_XTAL as u8,
+                    rc_ctiv: 0, rc_temp_ctiv: 0, accuracy_ppm: 50,
+                    skip_wait_lfclk_started: false,
+                }
+            }
+        };
+        for items in [quote! { #chip #mpsl }, quote! { #mpsl #chip }] {
+            let module = syn::parse2(quote! { mod keyboard { #items } }).unwrap();
+            assert!(crate::codegen::override_helper::validate_overwritten_attrs(&module).is_none());
+            let tokens = super::expand_chip_init(&hardware, None, &module).to_string();
+            assert!(tokens.contains("MPSL_CLOCK_LF_SRC_XTAL"), "{tokens}");
+            assert!(!tokens.contains("MPSL_CLOCK_LF_SRC_RC"), "{tokens}");
+            assert!(tokens.contains("build_sdc"), "{tokens}");
+        }
+    }
+
+    #[test]
+    fn cfg_disabled_clock_override_keeps_the_default_rc_config() {
+        let hardware = board_hardware("nrf52840_ble_split");
+        let module = syn::parse2(quote! {
+            mod keyboard {
+                #[cfg(any())]
+                #[Override(mpsl_lfclk_config)]
+                fn lfclk_config() { disabled_clock_config() }
+            }
+        })
+        .unwrap();
+        assert!(crate::codegen::override_helper::validate_overwritten_attrs(&module).is_none());
+        let tokens = super::expand_chip_init(&hardware, None, &module).to_string();
+        assert!(tokens.contains("MPSL_CLOCK_LF_SRC_RC"), "{tokens}");
+        assert!(!tokens.contains("disabled_clock_config"), "{tokens}");
+    }
+
+    #[test]
+    fn whole_chip_init_override_still_replaces_generated_initialization() {
+        let hardware = board_hardware("nrf52840_ble_split");
+        let module = syn::parse2(quote! {
+            mod keyboard {
+                #[Override(chip_init)]
+                fn init() { let custom_peripherals = application_init(); }
+            }
+        })
+        .unwrap();
+        let names = binding_names(super::expand_chip_init(&hardware, None, &module));
+        assert_eq!(names, ["custom_peripherals"]);
+    }
+
+    #[test]
+    fn unsupported_mpsl_hook_is_rejected_regardless_of_whole_init_order() {
+        let hardware = board_hardware("rp2040");
+        let whole_init = quote! {
+            #[Override(chip_init)]
+            fn init() { let p = application_init(); }
+        };
+        let mpsl = quote! {
+            #[Override(mpsl_lfclk_config)]
+            fn lfclk_config() { application_clock_config() }
+        };
+        for items in [quote! { #whole_init #mpsl }, quote! { #mpsl #whole_init }] {
+            let module = syn::parse2(quote! { mod keyboard { #items } }).unwrap();
+            let tokens = super::expand_chip_init(&hardware, None, &module).to_string();
+            assert!(
+                tokens.contains("mpsl_lfclk_config requires an nRF52 BLE keyboard"),
+                "{tokens}"
+            );
+        }
+    }
 
     /// The chip init generated for an nRF52833 keyboard whose `[chip.nrf52833]` holds `chip_section`.
     fn nrf52833_chip_init(name: &str, chip_section: &str) -> String {

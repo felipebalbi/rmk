@@ -7,6 +7,7 @@ use syn::{ItemFn, ItemMod};
 pub enum Overwritten {
     Usb,
     ChipConfig,
+    MpslLfclkConfig,
     ChipInit,
     Entry,
     /// `#[Override(bind_interrupt)]` — the form the stm32h7 example documents. Selected by
