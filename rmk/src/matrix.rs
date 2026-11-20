@@ -8,9 +8,19 @@ use crate::core_traits::Runnable;
 use crate::debounce::{DebounceState, DebouncerTrait};
 use crate::event::{KeyboardEvent, publish_event_async};
 use crate::input_device::InputDevice;
+
+#[cfg(all(
+    feature = "prototype_matrix_scan",
+    target_os = "none",
+    not(all(target_arch = "arm", feature = "nrf52840"))
+))]
+compile_error!("prototype_matrix_scan cycle-counted settling supports only the 64 MHz nRF52840");
 pub mod bidirectional_matrix;
 pub mod direct_pin;
 pub mod hc595_matrix;
+
+#[cfg(all(test, feature = "prototype_matrix_scan"))]
+mod tests;
 
 /// Recording the matrix pressed state
 #[cfg(feature = "host_lock")]
@@ -370,8 +380,12 @@ where
                 if let Some(out_pin) = self.get_output_pins_mut().get_mut(out_idx) {
                     out_pin.set_high().ok();
                 }
-                // This may take >1ms on some platforms if other tasks are running!
+                #[cfg(not(feature = "prototype_matrix_scan"))]
                 Timer::after_micros(1).await;
+                // This experiment targets the nRF52840's fixed 64 MHz CPU clock.
+                // Host tests model scan scheduling, not electrical settling.
+                #[cfg(all(feature = "prototype_matrix_scan", target_arch = "arm", target_os = "none"))]
+                cortex_m::asm::delay(64);
 
                 let in_start = if out_idx == out_idx_start { in_idx_start } else { 0 };
 
@@ -425,8 +439,16 @@ where
 
             #[cfg(feature = "async_matrix")]
             {
+                #[cfg(feature = "prototype_matrix_scan")]
+                if self.rescan_needed {
+                    // Bound active polling while retaining GPIO-only wake when idle.
+                    Timer::after_millis(1).await;
+                }
                 if !self.rescan_needed {
                     self.wait_for_key().await;
+                    // A spurious level or immediate I/O error must still yield.
+                    #[cfg(feature = "prototype_matrix_scan")]
+                    embassy_futures::yield_now().await;
                 }
                 self.rescan_needed = false;
             }
